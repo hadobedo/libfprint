@@ -817,6 +817,13 @@ fpi_device_goodixtls581a_class_init (FpiDeviceGoodixTls581aClass * class)
    */
   dev_class->nr_enroll_stages = 16;
   dev_class->scan_type = FP_SCAN_TYPE_PRESS;
+  /* No temperature readout on this sensor, so libfprint's time-based model
+   * only guesses. It cancels a running identify after three minutes with
+   * FP_DEVICE_ERROR_TOO_HOT, which kills the lock screen. The OEM driver polls
+   * continuously for as long as a session is open. Same opt-out as goodixmoc,
+   * synaptics, fpcmoc and elanmoc.
+   */
+  dev_class->temp_hot_seconds = -1;
 
   img_dev_class->bz3_threshold = 24;
   img_dev_class->img_width = GOODIX_581A_WIDTH;
