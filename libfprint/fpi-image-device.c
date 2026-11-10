@@ -742,6 +742,9 @@ fpi_image_device_sigfm_process (FpImageDevice *self, FpImage *image)
                   g_variant_unref (stage_bytes);
                 }
 
+              g_message ("SIGFM identify: template %u: max_score = %d, matched_stages = %d",
+                         t, max_score, matched_stages);
+
               if (max_score >= 70 || (max_score >= 45 && matched_stages >= 2))
                 {
                   matched_template = tmpl;
