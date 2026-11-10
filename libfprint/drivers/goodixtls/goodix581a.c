@@ -33,6 +33,7 @@ struct _FpiDeviceGoodixTls581a
   guint calibration_frame_count;
   guint32 *scan_sum;
   guint scan_frame_count;
+  guint blank_retries;
   FpiSsm *scan_ssm;
 };
 
@@ -65,10 +66,10 @@ enum activate_states {
  * it returned BUSY on GM168SEC firmware and provided no key diagnostic.
  */
 static const guint8 goodix_581a_tls_psk_hash[32] = {
-  0x66, 0x68, 0x7a, 0xad, 0xf8, 0x62, 0xbd, 0x77,
-  0x6c, 0x8f, 0xc1, 0x8b, 0x8e, 0x9f, 0x8e, 0x20,
-  0x08, 0x97, 0x14, 0x85, 0x6e, 0xe2, 0x33, 0xb3,
-  0x90, 0x2a, 0x59, 0x1d, 0x0d, 0x5f, 0x29, 0x25,
+  0x98, 0x0e, 0x3c, 0x32, 0x18, 0xa5, 0x58, 0xc6,
+  0x2d, 0x94, 0x0f, 0xf5, 0x38, 0x7b, 0x91, 0x40,
+  0xe9, 0xa0, 0xcc, 0xa8, 0x34, 0x54, 0xa7, 0x10,
+  0xe8, 0xc2, 0x7a, 0xc7, 0x3f, 0xdd, 0x90, 0x5d,
 };
 
 static void
@@ -275,6 +276,56 @@ dev_activate (FpImageDevice *img_dev)
                  activate_complete);
 }
 
+static void on_581a_calib_read (FpDevice *dev, guint8 *data, guint16 length,
+                                gpointer user_data, GError *error);
+static void on_581a_mode5_read (FpDevice *dev, guint8 *data, guint16 length,
+                               gpointer user_data, GError *error);
+
+/* GM168 firmware returns one valid scan per 0x36 arm; back-to-back image
+ * requests without re-arming return blank frames. Mirror the OEM Windows
+ * driver's poll cycle (arm, then request) before every frame read. */
+static void
+on_581a_armed_read_mode1 (FpDevice *dev, guint8 *data, guint16 length,
+                          gpointer user_data, GError *error)
+{
+  FpiSsm *ssm = user_data;
+
+  if (error)
+    {
+      fpi_ssm_mark_failed (ssm, error);
+      return;
+    }
+  goodix_tls_read_image (dev, goodix_581a_get_image_mode1,
+                         sizeof (goodix_581a_get_image_mode1),
+                         on_581a_calib_read, ssm);
+}
+
+static void
+on_581a_armed_read_mode5 (FpDevice *dev, guint8 *data, guint16 length,
+                          gpointer user_data, GError *error)
+{
+  FpiSsm *ssm = user_data;
+
+  if (error)
+    {
+      fpi_ssm_mark_failed (ssm, error);
+      return;
+    }
+  goodix_tls_read_image (dev, goodix_581a_get_image_mode5,
+                         sizeof (goodix_581a_get_image_mode5),
+                         on_581a_mode5_read, ssm);
+}
+
+static void
+goodix_581a_arm_then_read (FpDevice *dev, FpiSsm *ssm, gboolean mode1)
+{
+  goodix_send_protocol (dev, GOODIX_CMD_MCU_SWITCH_TO_FDT_MODE,
+                        goodix_581a_payload_36, sizeof (goodix_581a_payload_36),
+                        NULL, TRUE, 0, TRUE,
+                        mode1 ? on_581a_armed_read_mode1 : on_581a_armed_read_mode5,
+                        ssm);
+}
+
 static void
 on_581a_calib_read (FpDevice *dev, guint8 *data, guint16 length,
                     gpointer user_data, GError *error)
@@ -321,9 +372,7 @@ on_581a_calib_read (FpDevice *dev, guint8 *data, guint16 length,
     {
       fp_dbg ("581a: Ambient baseline frame %u/%u",
               self->calibration_frame_count, GOODIX_581A_AVERAGE_FRAMES);
-      goodix_tls_read_image (dev, goodix_581a_get_image_mode1,
-                             sizeof (goodix_581a_get_image_mode1),
-                             on_581a_calib_read, ssm);
+      goodix_581a_arm_then_read (dev, ssm, TRUE);
       return;
     }
 
@@ -419,9 +468,7 @@ on_581a_mode5_read (FpDevice *dev, guint8 *data, guint16 length,
     {
       fp_dbg ("581a: Mode 5 finger frame %u/%u",
               self->scan_frame_count, GOODIX_581A_AVERAGE_FRAMES);
-      goodix_tls_read_image (dev, goodix_581a_get_image_mode5,
-                             sizeof (goodix_581a_get_image_mode5),
-                             on_581a_mode5_read, ssm);
+      goodix_581a_arm_then_read (dev, ssm, FALSE);
       return;
     }
 
@@ -502,6 +549,17 @@ on_581a_mode5_read (FpDevice *dev, guint8 *data, guint16 length,
 
   fp_dbg ("581a: Ridge contrast range: p5=%d, p95=%d, active=%d pixels, usable=%d",
           p5, p95, n_active, has_usable_contrast);
+
+  /* GM168 occasionally returns a blank scan even when armed; re-arm and
+   * retry a bounded number of times before surfacing the frame. */
+  if (!has_usable_contrast && self->blank_retries < 4)
+    {
+      self->blank_retries++;
+      fp_dbg ("581a: blank frame, re-arming (retry %u/4)", self->blank_retries);
+      goodix_581a_arm_then_read (dev, ssm, FALSE);
+      return;
+    }
+  self->blank_retries = 0;
 
   FpImage *img = fp_image_new (GOODIX_581A_WIDTH, GOODIX_581A_HEIGHT);
   img->flags |= FPI_IMAGE_PARTIAL;
@@ -599,9 +657,7 @@ scan_581a_run_state (FpiSsm *ssm, FpDevice *dev)
     case SCAN_581A_CAPTURE:
       fp_dbg ("581a: Capturing %u Mode 5 finger frames...",
               GOODIX_581A_AVERAGE_FRAMES);
-      goodix_tls_read_image (dev, goodix_581a_get_image_mode5,
-                             sizeof (goodix_581a_get_image_mode5),
-                             on_581a_mode5_read, ssm);
+      goodix_581a_arm_then_read (dev, ssm, FALSE);
       break;
 
     case SCAN_581A_AWAIT_UP:

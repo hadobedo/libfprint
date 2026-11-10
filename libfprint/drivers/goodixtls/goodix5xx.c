@@ -333,7 +333,9 @@ scan_on_read_img (FpDevice *dev, guint8 *data, guint16 len,
 
   GoodixTls5xxPix * raw_frame = calloc (cls->scan_width * cls->scan_height, sizeof (GoodixTls5xxPix));
   goodixtls5xx_decode_frame (raw_frame, len, data, cls->raw_header_len, cls->raw_footer_len);
-  linear_subtract_inplace(raw_frame, priv->calibration_img, cls->scan_width * cls->scan_height);
+  /* GM168: the OEM Windows driver matches raw frames without ambient
+   * subtraction; subtracting the mode-1 baseline destroys repeatability
+   * on this firmware. Squash normalizes each frame directly. */
   guint8 * squashed = calloc (cls->scan_height * cls->scan_width, 1);
   goodixtls5xx_squash_frame_linear (raw_frame, squashed, cls->scan_height * cls->scan_width);
   free (raw_frame);
