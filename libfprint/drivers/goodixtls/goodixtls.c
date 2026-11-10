@@ -68,9 +68,62 @@ tls_server_psk_server_callback (SSL           *ssl,
       return 0;
     }
 
-  // zero out the psk
-  for (int n = 0; n != len; ++n)
-    psk[n] = 0;
+  /* Goodix 581a units provisioned by the Windows OEM driver carry a
+   * device-specific TLS PSK. Load it from /etc/libfprint/goodix581a-psk
+   * (64 hex digits, whitespace ignored); fall back to the factory
+   * all-zero key when the file is absent or malformed.
+   */
+  {
+    static unsigned char cached_psk[32];
+    static int cached = 0;
+
+    if (!cached)
+      {
+        const char *path = g_getenv ("LIBFPRINT_GOODIX581A_PSK_FILE");
+        FILE *f;
+
+        if (path == NULL)
+          path = "/etc/libfprint/goodix581a-psk";
+
+        memset (cached_psk, 0, sizeof (cached_psk));
+        f = fopen (path, "r");
+        if (f != NULL)
+          {
+            char hex[128] = { 0 };
+            size_t got = fread (hex, 1, sizeof (hex) - 1, f);
+            int hi = -1, pos = 0;
+
+            fclose (f);
+            for (size_t i = 0; i < got && pos < 32; i++)
+              {
+                char c = hex[i];
+                int v = (c >= '0' && c <= '9') ? c - '0'
+                      : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+                      : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+
+                if (v < 0)
+                  continue;
+                if (hi < 0)
+                  hi = v;
+                else
+                  {
+                    cached_psk[pos++] = (hi << 4) | v;
+                    hi = -1;
+                  }
+              }
+            if (pos == 32)
+              fp_dbg ("Loaded Goodix 581a PSK from %s", path);
+            else
+              fp_warn ("Bad PSK file %s (%d bytes parsed); using all-zero key",
+                       path, pos);
+          }
+        else
+          fp_dbg ("No PSK file %s; using all-zero factory key", path);
+        cached = 1;
+      }
+
+    memcpy (psk, cached_psk, len);
+  }
 
   return len;
 }
