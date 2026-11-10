@@ -265,7 +265,7 @@ opencv_imgproc = cc.find_library('opencv_imgproc', required: false)
 cpp_lib = cc.find_library('stdc++', required: false)
 
 if opencv_core.found() and opencv_features2d.found() and opencv_flann.found() and opencv_imgproc.found()
-    opencv_inc = include_directories('/usr/include/opencv4')
+    opencv_inc = include_directories('/usr/include/opencv5')
     sigfm_libs = [opencv_core, opencv_features2d, opencv_flann, opencv_imgproc, cpp_lib]
     libsigfm = static_library('sigfm',
         'sigfm/sigfm.cpp',
